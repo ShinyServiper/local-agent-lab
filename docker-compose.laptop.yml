@@ -1,0 +1,74 @@
+#Uses the Ollama app already running on the laptop instead of an Ollama container.
+#To run Ollama in a container instead, use docker-compose.yml
+#
+#Before starting: make sure the Ollama app is running and has the model, e.g.  ollama pull qwen3.5:2b
+#
+#Start everything:  docker compose -f docker-compose.laptop.yml up -d --build --remove-orphans
+#Settings:          copy .env.example to .env and edit (model, keys, ports, time zone)
+#
+#Open WebUI:  http://localhost:3000  (the first account you create becomes the admin)
+#Phoenix:     http://localhost:6006
+#Agent API:   http://localhost:5005  (for Postman / curl)
+
+#Same project name as docker-compose.yml, so both setups share the Open WebUI and Phoenix data
+name: openwebui-agent
+
+services:
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    environment:
+      PHOENIX_WORKING_DIR: /mnt/data
+    volumes:
+      - phoenix-data:/mnt/data
+    ports:
+      - "${PHOENIX_HOST_PORT:-6006}:6006"        #UI and HTTP trace collector
+      - "${PHOENIX_GRPC_HOST_PORT:-4317}:4317"   #gRPC trace collector
+    restart: unless-stopped
+
+  agent:
+    build: .
+    environment:
+      #Ollama app on the laptop ("localhost" inside the container is the container itself)
+      OLLAMA_BASE_URL: ${LAPTOP_OLLAMA_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3.5:0.8b}
+      PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006/v1/traces
+      AGENT_API_KEY: ${AGENT_API_KEY:-somekey}
+      FLASK_DEBUG: "0"
+      TZ: ${TZ:-America/New_York}
+    #Docker Desktop provides host.docker.internal already; this also makes it work on Linux
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      #Published for testing from the host; Open WebUI reaches it over the compose network
+      - "${AGENT_HOST_PORT:-5005}:5005"
+    depends_on:
+      phoenix:
+        condition: service_started
+    restart: unless-stopped
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    environment:
+      #Connect Open WebUI to the agent's OpenAI-compatible API
+      ENABLE_OPENAI_API: "true"
+      OPENAI_API_BASE_URL: http://agent:5005/v1
+      OPENAI_API_KEY: ${AGENT_API_KEY:-somekey}
+      #Only offer the agent in the model list, not the raw Ollama models
+      ENABLE_OLLAMA_API: "false"
+      #Send X-OpenWebUI-Chat-Id / X-OpenWebUI-User-Id so Phoenix groups traces by chat
+      ENABLE_FORWARD_USER_INFO_HEADERS: "true"
+      #Keeps logins valid across container restarts
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-change-me}
+      TZ: ${TZ:-America/New_York}
+    volumes:
+      - open-webui-data:/app/backend/data
+    ports:
+      - "${OPENWEBUI_HOST_PORT:-3000}:8080"
+    depends_on:
+      agent:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  phoenix-data:
+  open-webui-data:
